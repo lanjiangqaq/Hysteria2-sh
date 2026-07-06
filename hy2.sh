@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hysteria2 Automated Installation Script (Let's Encrypt Edition)
+# Hysteria2 Automated Installation & Management Script (Let's Encrypt Edition)
 # Author: Modified for Production & Security
 
 GREEN="\033[32m"
@@ -40,24 +40,32 @@ detect_os() {
     fi
 }
 
-# 收集用户必要信息 (域名与邮箱)
+# 收集用户必要信息 (循环验证输入不能为空)
 get_user_input() {
     echo -e "${CYAN}===== 证书配置信息获取 =====${RESET}"
-    read -p "请输入您已解析至本机的真实域名 (用于申请证书与 SNI): " DOMAIN
-    if [ -z "$DOMAIN" ]; then
-        echo -e "${RED}错误: 域名不能为空。${RESET}"
-        exit 1
-    fi
+    
+    while true; do
+        read -p "请输入您已解析至本机的真实域名 (用于申请证书与 SNI): " DOMAIN
+        if [ -n "$DOMAIN" ]; then
+            break
+        else
+            echo -e "${RED}错误: 域名不能为空，请重新输入。${RESET}"
+        fi
+    done
 
-    read -p "请输入您的邮箱 (用于接收证书到期通知): " EMAIL
-    if [ -z "$EMAIL" ]; then
-        echo -e "${RED}错误: 邮箱不能为空。${RESET}"
-        exit 1
-    fi
+    while true; do
+        read -p "请输入您的邮箱 (用于接收证书到期通知): " EMAIL
+        if [ -n "$EMAIL" ]; then
+            break
+        else
+            echo -e "${RED}错误: 邮箱不能为空，请重新输入。${RESET}"
+        fi
+    done
+    
     echo -e "${CYAN}============================${RESET}"
 }
 
-# 安装必要的包 (新增 socat 以支持 acme.sh 独立模式)
+# 安装必要的包
 install_packages() {
     detect_os
     
@@ -234,7 +242,9 @@ EOF
 }
 EOF
     rm -f tcp-wss.sh hy2.sh
-    clear
+    
+    show_client_config
+    check_service_status
 }
 
 # 服务状态检查
@@ -258,7 +268,7 @@ check_service_status() {
 
 # 输出客户端配置
 show_client_config() {
-    local connection_link="${HYSTERIA_PASSWORD}@${DOMAIN}:${SERVER_PORT}?sni=${DOMAIN}#${DOMAIN}"
+    local connection_link="${HYSTERIA_PASSWORD}@${DOMAIN}:${SERVER_PORT}/?sni=${DOMAIN}#${DOMAIN}"
 
     echo
     echo -e "${GREEN}===== Hysteria2 安装与配置完成 =====${RESET}"
@@ -274,7 +284,7 @@ show_client_config() {
     echo -e "${CYAN}==================================${RESET}"
     echo
     echo -e "${CYAN}连接链接 (URI 格式):${RESET}"
-    echo -e "${GREEN}hy2://${connection_link}${RESET}"
+    echo -e "${GREEN}hysteria2://${connection_link}${RESET}"
     echo
     echo -e "客户端配置文件已保存到: ${YELLOW}/etc/hysteria/hyclient.json${RESET}"
     echo
@@ -290,16 +300,72 @@ show_client_config() {
     echo
 }
 
-# 主函数
-main() {
-    echo -e "${GREEN}Hysteria2 一键安装与配置脚本 (Let's Encrypt 版)${RESET}"
-    echo "支持的系统: Ubuntu/Debian/CentOS/RHEL/AlmaLinux/Rocky Linux/openSUSE/Arch Linux"
-    echo
+# 彻底卸载 Hysteria2
+uninstall_hysteria2() {
+    echo -e "${YELLOW}开始执行 Hysteria2 彻底卸载程序...${RESET}"
     
-    install_hysteria2
-    show_client_config
-    check_service_status
+    # 停止并禁用守护进程
+    if command -v systemctl &> /dev/null; then
+        echo "停止并禁用 hysteria-server 服务..."
+        systemctl stop hysteria-server.service 2>/dev/null || true
+        systemctl disable hysteria-server.service 2>/dev/null || true
+        rm -f /etc/systemd/system/hysteria-server.service
+        systemctl daemon-reload
+    fi
+
+    # 清理正在运行的孤儿进程
+    if pgrep -f hysteria &> /dev/null; then
+        echo "终止残留的 Hysteria 进程..."
+        pkill -f hysteria
+    fi
+
+    # 移除核心程序与配置文件
+    echo "删除核心二进制文件及配置目录..."
+    rm -f /usr/local/bin/hysteria
+    rm -rf /etc/hysteria
+
+    echo -e "${GREEN}======================================================${RESET}"
+    echo -e "${GREEN} Hysteria2 及其配置文件、证书副本均已从系统中彻底卸载 ${RESET}"
+    echo -e "${GREEN}======================================================${RESET}"
 }
 
-# 执行主函数
-main
+# 主菜单交互界面
+show_menu() {
+    clear
+    echo -e "${GREEN}======================================================${RESET}"
+    echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (Let's Encrypt 版)    ${RESET}"
+    echo -e "${GREEN}======================================================${RESET}"
+    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (包含自动签发证书及配置生成)"
+    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2"
+    echo -e "${CYAN} 0.${RESET} 退出脚本"
+    echo -e "${GREEN}======================================================${RESET}"
+    echo ""
+    
+    read -p "请输入对应的数字以选择功能: " choice
+    
+    case $choice in
+        1)
+            install_hysteria2
+            ;;
+        2)
+            read -p "您确定要彻底卸载 Hysteria 2 及其所有配置文件吗？[y/N]: " confirm
+            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                uninstall_hysteria2
+            else
+                echo -e "${YELLOW}已取消卸载操作。${RESET}"
+            fi
+            ;;
+        0)
+            echo "已退出脚本。"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}输入错误，请输入有效的数字选项。${RESET}"
+            sleep 2
+            show_menu
+            ;;
+    esac
+}
+
+# 执行主程序入口
+show_menu
