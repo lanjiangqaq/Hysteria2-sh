@@ -40,7 +40,7 @@ detect_os() {
     fi
 }
 
-# 收集用户必要信息 (循环验证输入不能为空)
+# 收集用户必要信息
 get_user_input() {
     echo -e "${CYAN}===== 证书配置信息获取 =====${RESET}"
     
@@ -65,7 +65,7 @@ get_user_input() {
     echo -e "${CYAN}============================${RESET}"
 }
 
-# 安装必要的包
+# 安装必要的包 (新增 psmisc 以增强端口检测能力)
 install_packages() {
     detect_os
     
@@ -74,27 +74,27 @@ install_packages() {
     if command -v apt-get &> /dev/null; then
         echo "使用 APT 包管理器..."
         apt-get update -y
-        apt-get install -y curl wget openssl gawk ca-certificates socat lsof
+        apt-get install -y curl wget openssl gawk ca-certificates socat lsof psmisc
     elif command -v yum &> /dev/null; then
         echo "使用 YUM 包管理器..."
         yum update -y
         yum install -y epel-release
-        yum install -y curl wget openssl gawk ca-certificates socat lsof
+        yum install -y curl wget openssl gawk ca-certificates socat lsof psmisc
     elif command -v dnf &> /dev/null; then
         echo "使用 DNF 包管理器..."
         dnf update -y
-        dnf install -y curl wget openssl gawk ca-certificates socat lsof
+        dnf install -y curl wget openssl gawk ca-certificates socat lsof psmisc
     elif command -v zypper &> /dev/null; then
         echo "使用 Zypper 包管理器..."
         zypper refresh
-        zypper install -y curl wget openssl gawk ca-certificates socat lsof
+        zypper install -y curl wget openssl gawk ca-certificates socat lsof psmisc
     elif command -v pacman &> /dev/null; then
         echo "使用 Pacman 包管理器..."
         pacman -Syu --noconfirm
-        pacman -S --noconfirm curl wget openssl gawk ca-certificates socat lsof
+        pacman -S --noconfirm curl wget openssl gawk ca-certificates socat lsof psmisc
     else
         echo "错误: 未找到支持的包管理器!"
-        echo "请手动安装以下依赖: curl wget openssl gawk ca-certificates socat lsof"
+        echo "请手动安装以下依赖: curl wget openssl gawk ca-certificates socat lsof psmisc"
         exit 1
     fi
 }
@@ -135,6 +135,31 @@ get_port() {
     fi
 }
 
+# 智能检测并释放 80 端口
+release_port_80() {
+    echo -e "${YELLOW}开始检测 80 端口占用情况...${RESET}"
+    
+    # 首先尝试正常停止常见的 Web 服务避免产生僵尸进程
+    systemctl stop nginx 2>/dev/null || true
+    systemctl stop apache2 2>/dev/null || true
+    systemctl stop httpd 2>/dev/null || true
+
+    # 使用 lsof 深度检测并强制清理
+    if command -v lsof >/dev/null 2>&1; then
+        PORT_80_PIDS=$(lsof -t -i:80 || true)
+        if [ -n "$PORT_80_PIDS" ]; then
+            echo -e "${RED}警告: 80 端口仍被占用！进程 PID: ${PORT_80_PIDS}。正在强制释放...${RESET}"
+            for pid in $PORT_80_PIDS; do
+                kill -9 "$pid" 2>/dev/null || true
+            done
+            sleep 2
+            echo -e "${GREEN}80 端口强制释放完毕。${RESET}"
+        else
+            echo -e "${GREEN}80 端口当前空闲。${RESET}"
+        fi
+    fi
+}
+
 # 安装 Hysteria2 并配置证书
 install_hysteria2() {
     get_user_input
@@ -144,14 +169,6 @@ install_hysteria2() {
     generate_password
     echo "获取端口配置..."
     get_port
-
-    echo "释放 80 端口以用于证书验证..."
-    if command -v lsof >/dev/null 2>&1; then
-        PORT_80_PID=$(lsof -t -i:80 || true)
-        if [ -n "$PORT_80_PID" ]; then
-            kill -9 $PORT_80_PID
-        fi
-    fi
 
     echo "下载并安装 Hysteria2..."
     if ! bash <(curl -fsSL https://get.hy2.sh/); then
@@ -166,6 +183,9 @@ install_hysteria2() {
     
     echo "切换默认 CA 为 Let's Encrypt..."
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+
+    # 在申请证书前执行 80 端口强制释放
+    release_port_80
 
     echo "为 $DOMAIN 申请 TLS 证书..."
     if ! /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone -k ec-256; then
@@ -300,7 +320,7 @@ show_client_config() {
     echo
 }
 
-# 彻底卸载 Hysteria2
+# 彻底卸载 Hysteria2 及清理部署脚本
 uninstall_hysteria2() {
     echo -e "${YELLOW}开始执行 Hysteria2 彻底卸载程序...${RESET}"
     
@@ -324,9 +344,16 @@ uninstall_hysteria2() {
     rm -f /usr/local/bin/hysteria
     rm -rf /etc/hysteria
 
+    # 删除脚本自身
+    SCRIPT_PATH=$(readlink -f "$0")
+    echo "清理部署脚本自身..."
+    rm -f "$SCRIPT_PATH"
+
     echo -e "${GREEN}======================================================${RESET}"
     echo -e "${GREEN} Hysteria2 及其配置文件、证书副本均已从系统中彻底卸载 ${RESET}"
+    echo -e "${GREEN} 本地部署脚本文件已被一并删除。                       ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
+    exit 0
 }
 
 # 主菜单交互界面
@@ -336,7 +363,7 @@ show_menu() {
     echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (Let's Encrypt 版)    ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
     echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (包含自动签发证书及配置生成)"
-    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2"
+    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2 (并删除本脚本)"
     echo -e "${CYAN} 0.${RESET} 退出脚本"
     echo -e "${GREEN}======================================================${RESET}"
     echo ""
@@ -348,7 +375,7 @@ show_menu() {
             install_hysteria2
             ;;
         2)
-            read -p "您确定要彻底卸载 Hysteria 2 及其所有配置文件吗？[y/N]: " confirm
+            read -p "您确定要彻底卸载 Hysteria 2 及其所有配置文件，并删除此脚本自身吗？[y/N]: " confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 uninstall_hysteria2
             else
