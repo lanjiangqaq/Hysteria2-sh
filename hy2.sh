@@ -45,7 +45,7 @@ get_user_input() {
     echo -e "${CYAN}===== 基础配置信息获取 =====${RESET}"
     
     while true; do
-        read -p "请输入您已解析至本机的真实域名 (必须包含 '.', 用于申请证书与 SNI): " DOMAIN
+        read -p "请输入您已解析至本机的真实域名 (用于申请证书与 SNI): " DOMAIN
         if [ -n "$DOMAIN" ]; then
             break
         else
@@ -324,10 +324,10 @@ uninstall_hysteria2() {
 show_menu() {
     clear
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (Let's Encrypt 版)    ${RESET}"
+    echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (Let's Encrypt 自动签发证书版)    ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (包含自动签发证书及自定义伪装)"
-    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2 (并删除本脚本)"
+    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2"
+    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2"
     echo -e "${CYAN} 0.${RESET} 退出脚本"
     echo -e "${GREEN}======================================================${RESET}"
     echo ""
@@ -339,7 +339,7 @@ show_menu() {
             install_hysteria2
             ;;
         2)
-            read -p "您确定要彻底卸载 Hysteria 2 并删除此脚本自身吗？[y/N]: " confirm
+            read -p "您确定要彻底卸载 Hysteria 2 并删除此脚本自身吗？[Y/N]: " confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 uninstall_hysteria2
             else
