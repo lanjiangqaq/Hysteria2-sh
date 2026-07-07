@@ -42,10 +42,10 @@ detect_os() {
 
 # 收集用户必要信息
 get_user_input() {
-    echo -e "${CYAN}===== 证书配置信息获取 =====${RESET}"
+    echo -e "${CYAN}===== 基础配置信息获取 =====${RESET}"
     
     while true; do
-        read -p "请输入您已解析至本机的真实域名 (用于申请证书与 SNI): " DOMAIN
+        read -p "请输入您已解析至本机的真实域名 (必须包含 '.', 用于申请证书与 SNI): " DOMAIN
         if [ -n "$DOMAIN" ]; then
             break
         else
@@ -62,48 +62,51 @@ get_user_input() {
         fi
     done
     
+    echo -e "${CYAN}===== 伪装站点设置 =====${RESET}"
+    echo "当防火墙或审查者主动探测您的节点时，服务端将向其展示该网站的内容。"
+    read -p "请输入防主动探测的伪装网站 URL (默认: https://www.bing.com): " MASQUERADE_URL
+    
+    # 若用户直接回车，则使用默认值
+    if [ -z "$MASQUERADE_URL" ]; then
+        MASQUERADE_URL="https://www.bing.com"
+    # 自动为用户补全 https:// 协议头
+    elif [[ ! "$MASQUERADE_URL" =~ ^https?:// ]]; then
+        MASQUERADE_URL="https://${MASQUERADE_URL}"
+    fi
     echo -e "${CYAN}============================${RESET}"
 }
 
-# 安装必要的包 (新增 psmisc 以增强端口检测能力)
+# 安装必要的包
 install_packages() {
     detect_os
     
     echo "检测到操作系统: $DETECTED_OS $OS_VERSION"
     
     if command -v apt-get &> /dev/null; then
-        echo "使用 APT 包管理器..."
         apt-get update -y
         apt-get install -y curl wget openssl gawk ca-certificates socat lsof psmisc
     elif command -v yum &> /dev/null; then
-        echo "使用 YUM 包管理器..."
         yum update -y
         yum install -y epel-release
         yum install -y curl wget openssl gawk ca-certificates socat lsof psmisc
     elif command -v dnf &> /dev/null; then
-        echo "使用 DNF 包管理器..."
         dnf update -y
         dnf install -y curl wget openssl gawk ca-certificates socat lsof psmisc
     elif command -v zypper &> /dev/null; then
-        echo "使用 Zypper 包管理器..."
         zypper refresh
         zypper install -y curl wget openssl gawk ca-certificates socat lsof psmisc
     elif command -v pacman &> /dev/null; then
-        echo "使用 Pacman 包管理器..."
         pacman -Syu --noconfirm
         pacman -S --noconfirm curl wget openssl gawk ca-certificates socat lsof psmisc
     else
-        echo "错误: 未找到支持的包管理器!"
-        echo "请手动安装以下依赖: curl wget openssl gawk ca-certificates socat lsof psmisc"
+        echo "错误: 未找到支持的包管理器，请手动安装依赖。"
         exit 1
     fi
 }
 
-# 检查并启用 systemd 服务
+# 检查 systemd
 check_systemd() {
     if ! command -v systemctl &> /dev/null; then
-        echo "警告: systemctl 未找到，可能不支持 systemd"
-        echo "请手动管理 hysteria 服务"
         return 1
     fi
     return 0
@@ -138,29 +141,23 @@ get_port() {
 # 智能检测并释放 80 端口
 release_port_80() {
     echo -e "${YELLOW}开始检测 80 端口占用情况...${RESET}"
-    
-    # 首先尝试正常停止常见的 Web 服务避免产生僵尸进程
     systemctl stop nginx 2>/dev/null || true
     systemctl stop apache2 2>/dev/null || true
     systemctl stop httpd 2>/dev/null || true
+    systemctl stop caddy 2>/dev/null || true
 
-    # 使用 lsof 深度检测并强制清理
     if command -v lsof >/dev/null 2>&1; then
         PORT_80_PIDS=$(lsof -t -i:80 || true)
         if [ -n "$PORT_80_PIDS" ]; then
-            echo -e "${RED}警告: 80 端口仍被占用！进程 PID: ${PORT_80_PIDS}。正在强制释放...${RESET}"
             for pid in $PORT_80_PIDS; do
                 kill -9 "$pid" 2>/dev/null || true
             done
             sleep 2
-            echo -e "${GREEN}80 端口强制释放完毕。${RESET}"
-        else
-            echo -e "${GREEN}80 端口当前空闲。${RESET}"
         fi
     fi
 }
 
-# 安装 Hysteria2 并配置证书
+# 安装 Hysteria2 并配置
 install_hysteria2() {
     get_user_input
     echo "开始安装依赖包..."
@@ -170,7 +167,7 @@ install_hysteria2() {
     echo "获取端口配置..."
     get_port
 
-    echo "下载并安装 Hysteria2..."
+    echo "下载并安装 Hysteria2 官方核心..."
     if ! bash <(curl -fsSL https://get.hy2.sh/); then
         echo "错误: Hysteria2 安装失败"
         exit 1
@@ -180,24 +177,21 @@ install_hysteria2() {
     if [ ! -f "/root/.acme.sh/acme.sh" ]; then
         curl https://get.acme.sh | sh -s email="$EMAIL"
     fi
-    
-    echo "切换默认 CA 为 Let's Encrypt..."
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
-    # 在申请证书前执行 80 端口强制释放
     release_port_80
 
     echo "为 $DOMAIN 申请 TLS 证书..."
     if ! /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone -k ec-256; then
-        echo "错误: 证书申请失败，请检查域名解析是否生效及 80 端口是否被阻塞。"
+        echo -e "${RED}错误: 证书申请失败，请确认域名（如 xxx.992989.xyz）已正确输入且解析至本服务器。${RESET}"
         exit 1
     fi
 
-    echo "创建配置目录并安装证书..."
     mkdir -p /etc/hysteria/
     /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
         --key-file /etc/hysteria/server.key \
-        --fullchain-file /etc/hysteria/server.crt
+        --fullchain-file /etc/hysteria/server.crt \
+        --reloadcmd "systemctl restart hysteria-server"
 
     if id hysteria &> /dev/null; then
         chown -R hysteria:hysteria /etc/hysteria
@@ -205,7 +199,6 @@ install_hysteria2() {
     chmod 600 /etc/hysteria/server.key
     chmod 644 /etc/hysteria/server.crt
 
-    echo "动态生成 QUIC 性能参数..."
     STREAM_RW=$(awk -v min=16777216 -v max=33554432 'BEGIN{srand(); print int(min+rand()*(max-min+1))}')
     CONN_RW=$(awk -v min=33554432 -v max=83886080 'BEGIN{srand(); print int(min+rand()*(max-min+1))}')
 
@@ -224,7 +217,7 @@ auth:
 masquerade:
   type: proxy
   proxy:
-    url: https://www.bing.com
+    url: $MASQUERADE_URL
     rewriteHost: true
 
 quic:
@@ -244,7 +237,6 @@ EOF
         echo "请手动启动 Hysteria2 服务"
     fi
 
-    # 生成客户端标准配置文件
     cat > /etc/hysteria/hyclient.json << EOF
 {
   "server": "${DOMAIN}:${SERVER_PORT}",
@@ -274,13 +266,7 @@ check_service_status() {
         if systemctl is-active --quiet hysteria-server.service; then
             echo -e "${GREEN}✓ Hysteria2 服务运行正常${RESET}"
         else
-            echo -e "${RED}✗ Hysteria2 服务未运行，请执行 journalctl -u hysteria-server 查看日志${RESET}"
-        fi
-    else
-        if pgrep -f hysteria &> /dev/null; then
-            echo -e "${GREEN}✓ Hysteria2 进程运行正常${RESET}"
-        else
-            echo -e "${RED}✗ Hysteria2 进程未运行${RESET}"
+            echo -e "${RED}✗ Hysteria2 服务未运行，请执行 journalctl -u hysteria-server -e 查看日志${RESET}"
         fi
     fi
     echo -e "${CYAN}===================${RESET}"
@@ -297,10 +283,10 @@ show_client_config() {
     echo -e "服务器域名 (SNI): ${YELLOW}${DOMAIN}${RESET}"
     echo -e "端口            : ${YELLOW}${SERVER_PORT}${RESET}"
     echo -e "密码            : ${YELLOW}${HYSTERIA_PASSWORD}${RESET}"
-    echo -e "防封锁伪装站    : ${YELLOW}https://www.bing.com${RESET}"
+    echo -e "服务端伪装站    : ${YELLOW}${MASQUERADE_URL}${RESET}"
     echo -e "QUIC Stream 窗口: ${YELLOW}${STREAM_RW}${RESET}"
     echo -e "QUIC Conn 窗口  : ${YELLOW}${CONN_RW}${RESET}"
-    echo -e "跳过证书验证    : ${YELLOW}false (已启用严格安全校验)${RESET}"
+    echo -e "路由分流模式    : ${YELLOW}未启用 (全量直连)${RESET}"
     echo -e "${CYAN}==================================${RESET}"
     echo
     echo -e "${CYAN}连接链接 (URI 格式):${RESET}"
@@ -308,61 +294,39 @@ show_client_config() {
     echo
     echo -e "客户端配置文件已保存到: ${YELLOW}/etc/hysteria/hyclient.json${RESET}"
     echo
-    echo -e "${CYAN}注意事项:${RESET}"
-    echo -e "1. 请确保防火墙允许 ${YELLOW}${SERVER_PORT}/UDP${RESET} 端口通过。"
-    echo -e "2. 请确保服务器的 ${YELLOW}80/TCP${RESET} 端口未被屏蔽，以保障后续证书自动续期。"
-    echo -e "3. 服务端配置文件位置: ${YELLOW}/etc/hysteria/config.yaml${RESET}"
-    echo -e "4. 服务管理命令:"
-    echo -e "   启动: ${GREEN}systemctl start hysteria-server${RESET}"
-    echo -e "   停止: ${GREEN}systemctl stop hysteria-server${RESET}"
-    echo -e "   重启: ${GREEN}systemctl restart hysteria-server${RESET}"
-    echo -e "   状态: ${GREEN}systemctl status hysteria-server${RESET}"
-    echo
 }
 
-# 彻底卸载 Hysteria2 及清理部署脚本
+# 彻底卸载 Hysteria2
 uninstall_hysteria2() {
     echo -e "${YELLOW}开始执行 Hysteria2 彻底卸载程序...${RESET}"
-    
-    # 停止并禁用守护进程
     if command -v systemctl &> /dev/null; then
-        echo "停止并禁用 hysteria-server 服务..."
         systemctl stop hysteria-server.service 2>/dev/null || true
         systemctl disable hysteria-server.service 2>/dev/null || true
         rm -f /etc/systemd/system/hysteria-server.service
         systemctl daemon-reload
     fi
-
-    # 清理正在运行的孤儿进程
     if pgrep -f hysteria &> /dev/null; then
-        echo "终止残留的 Hysteria 进程..."
         pkill -f hysteria
     fi
-
-    # 移除核心程序与配置文件
-    echo "删除核心二进制文件及配置目录..."
     rm -f /usr/local/bin/hysteria
     rm -rf /etc/hysteria
 
-    # 删除脚本自身
     SCRIPT_PATH=$(readlink -f "$0")
-    echo "清理部署脚本自身..."
     rm -f "$SCRIPT_PATH"
 
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${GREEN} Hysteria2 及其配置文件、证书副本均已从系统中彻底卸载 ${RESET}"
-    echo -e "${GREEN} 本地部署脚本文件已被一并删除。                       ${RESET}"
+    echo -e "${GREEN} Hysteria2 已彻底卸载，本地部署脚本已被一并删除。     ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
     exit 0
 }
 
-# 主菜单交互界面
+# 主菜单
 show_menu() {
     clear
     echo -e "${GREEN}======================================================${RESET}"
     echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (Let's Encrypt 版)    ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (包含自动签发证书及配置生成)"
+    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (包含自动签发证书及自定义伪装)"
     echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2 (并删除本脚本)"
     echo -e "${CYAN} 0.${RESET} 退出脚本"
     echo -e "${GREEN}======================================================${RESET}"
@@ -375,7 +339,7 @@ show_menu() {
             install_hysteria2
             ;;
         2)
-            read -p "您确定要彻底卸载 Hysteria 2 及其所有配置文件，并删除此脚本自身吗？[y/N]: " confirm
+            read -p "您确定要彻底卸载 Hysteria 2 并删除此脚本自身吗？[y/N]: " confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 uninstall_hysteria2
             else
@@ -394,5 +358,4 @@ show_menu() {
     esac
 }
 
-# 执行主程序入口
 show_menu
