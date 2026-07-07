@@ -24,10 +24,10 @@
 
 ```bash
 # 1. 下载部署脚本
-wget -O install.sh [https://raw.githubusercontent.com/lanjiangqaq/Hysteria2-sh/main/install.sh](https://raw.githubusercontent.com/lanjiangqaq/Hysteria2-sh/main/hy.sh)
+wget -O hy.sh [https://raw.githubusercontent.com/lanjiangqaq/Hysteria2-sh/main/hy.sh](https://raw.githubusercontent.com/lanjiangqaq/Hysteria2-sh/main/hy.sh)
 
 # 2. 赋予脚本执行权限
-chmod +x install.sh
+chmod +x hy.sh
 
-# 3. 执行脚本
-sudo ./install.sh
+# 3. 执行脚本进入交互菜单
+sudo ./hy.sh
