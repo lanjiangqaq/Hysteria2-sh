@@ -20,7 +20,6 @@
 
 ## 快速开始
 
-在服务器终端依次执行以下指令即可启动部署流程：
 # 1. 下载脚本
 wget -O hy2.sh https://raw.githubusercontent.com/lanjiangqaq/Hysteria2-sh/main/hy2.sh
 
