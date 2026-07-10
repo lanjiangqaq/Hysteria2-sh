@@ -45,7 +45,7 @@ get_user_input() {
     echo -e "${CYAN}===== 基础配置信息获取 =====${RESET}"
     
     while true; do
-        read -p "请输入您已解析至本机的真实域名 (用于申请证书与 SNI): " DOMAIN
+        read -p "请输入您已解析至本机的真实域名 (必须包含 '.', 用于申请证书与 SNI): " DOMAIN
         if [ -n "$DOMAIN" ]; then
             break
         else
@@ -182,6 +182,7 @@ install_hysteria2() {
     release_port_80
 
     echo "为 $DOMAIN 申请 TLS 证书..."
+    # 使用 Standalone 模式申请证书
     if ! /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone -k ec-256; then
         echo -e "${RED}错误: 证书申请失败，请确认域名（如 xxx.992989.xyz）已正确输入且解析至本服务器。${RESET}"
         exit 1
@@ -296,26 +297,42 @@ show_client_config() {
     echo
 }
 
-# 彻底卸载 Hysteria2
+# 彻底卸载 Hysteria2 及清理证书环境
 uninstall_hysteria2() {
     echo -e "${YELLOW}开始执行 Hysteria2 彻底卸载程序...${RESET}"
+    
+    # 1. 停止并移除 Systemd 守护进程
     if command -v systemctl &> /dev/null; then
         systemctl stop hysteria-server.service 2>/dev/null || true
         systemctl disable hysteria-server.service 2>/dev/null || true
         rm -f /etc/systemd/system/hysteria-server.service
         systemctl daemon-reload
     fi
+    
+    # 2. 终止任何残留的 Hysteria 进程
     if pgrep -f hysteria &> /dev/null; then
         pkill -f hysteria
     fi
+    
+    # 3. 删除 Hysteria 核心文件与配置/证书存放目录
     rm -f /usr/local/bin/hysteria
     rm -rf /etc/hysteria
 
+    # 4. 彻底卸载 acme.sh 及其申请的所有证书与底层定时任务
+    echo -e "${YELLOW}正在清理 acme.sh 证书环境与定时任务...${RESET}"
+    if [ -f "/root/.acme.sh/acme.sh" ]; then
+        # 调用官方卸载命令以清除 crontab 定时续期任务
+        /root/.acme.sh/acme.sh --uninstall >/dev/null 2>&1
+        # 物理删除 acme.sh 根目录及所有域名的原始证书文件
+        rm -rf /root/.acme.sh
+    fi
+
+    # 5. 删除安装脚本自身
     SCRIPT_PATH=$(readlink -f "$0")
     rm -f "$SCRIPT_PATH"
 
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${GREEN} Hysteria2 已彻底卸载，本地部署脚本已被一并删除。     ${RESET}"
+    echo -e "${GREEN} 卸载完成！Hysteria 2、配置文件、证书环境及定时任务已彻底清除。${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
     exit 0
 }
@@ -324,10 +341,10 @@ uninstall_hysteria2() {
 show_menu() {
     clear
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (Let's Encrypt 自动签发证书版)    ${RESET}"
+    echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (Let's Encrypt 版)    ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2"
-    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2"
+    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (包含自动签发证书及自定义伪装)"
+    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2 (并删除本脚本)"
     echo -e "${CYAN} 0.${RESET} 退出脚本"
     echo -e "${GREEN}======================================================${RESET}"
     echo ""
@@ -339,7 +356,7 @@ show_menu() {
             install_hysteria2
             ;;
         2)
-            read -p "您确定要彻底卸载 Hysteria 2 并删除此脚本自身吗？[Y/N]: " confirm
+            read -p "您确定要彻底卸载 Hysteria 2 并删除此脚本自身吗？[y/N]: " confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 uninstall_hysteria2
             else
