@@ -45,7 +45,7 @@ get_user_input() {
     echo -e "${CYAN}===== 基础配置信息获取 =====${RESET}"
     
     while true; do
-        read -p "请输入您已解析至本机的真实域名 (必须包含 '.', 用于申请证书与 SNI): " DOMAIN
+        read -p "请输入您已解析至本机的真实域名: " DOMAIN
         if [ -n "$DOMAIN" ]; then
             break
         else
@@ -343,8 +343,8 @@ show_menu() {
     echo -e "${GREEN}======================================================${RESET}"
     echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (Let's Encrypt 版)    ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (包含自动签发证书及自定义伪装)"
-    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2 (并删除本脚本)"
+    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2"
+    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2"
     echo -e "${CYAN} 0.${RESET} 退出脚本"
     echo -e "${GREEN}======================================================${RESET}"
     echo ""
