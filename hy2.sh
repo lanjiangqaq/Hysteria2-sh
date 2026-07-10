@@ -356,7 +356,7 @@ show_menu() {
             install_hysteria2
             ;;
         2)
-            read -p "您确定要彻底卸载 Hysteria 2 并删除此脚本自身吗？[y/N]: " confirm
+            read -p "您确定要彻底卸载 Hysteria 2 并删除此脚本自身吗？[Y/N]: " confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 uninstall_hysteria2
             else
