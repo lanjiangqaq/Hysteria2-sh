@@ -1,6 +1,6 @@
 #!/bin/bash
 # Hysteria2 Automated Installation & Management Script (Let's Encrypt Edition)
-# Author: Modified for Production & Security
+# Author: Modified for Production, Security & Port Hopping
 
 GREEN="\033[32m"
 RED="\033[31m"
@@ -45,7 +45,7 @@ get_user_input() {
     echo -e "${CYAN}===== 基础配置信息获取 =====${RESET}"
     
     while true; do
-        read -p "请输入您已解析至本机的真实域名: " DOMAIN
+        read -p "请输入您已解析至本机的真实域名 (必须包含 '.', 用于申请证书与 SNI): " DOMAIN
         if [ -n "$DOMAIN" ]; then
             break
         else
@@ -84,20 +84,20 @@ install_packages() {
     
     if command -v apt-get &> /dev/null; then
         apt-get update -y
-        apt-get install -y curl wget openssl gawk ca-certificates socat lsof psmisc
+        apt-get install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables
     elif command -v yum &> /dev/null; then
         yum update -y
         yum install -y epel-release
-        yum install -y curl wget openssl gawk ca-certificates socat lsof psmisc
+        yum install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables
     elif command -v dnf &> /dev/null; then
         dnf update -y
-        dnf install -y curl wget openssl gawk ca-certificates socat lsof psmisc
+        dnf install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables
     elif command -v zypper &> /dev/null; then
         zypper refresh
-        zypper install -y curl wget openssl gawk ca-certificates socat lsof psmisc
+        zypper install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables
     elif command -v pacman &> /dev/null; then
         pacman -Syu --noconfirm
-        pacman -S --noconfirm curl wget openssl gawk ca-certificates socat lsof psmisc
+        pacman -S --noconfirm curl wget openssl gawk ca-certificates socat lsof psmisc iptables
     else
         echo "错误: 未找到支持的包管理器，请手动安装依赖。"
         exit 1
@@ -121,9 +121,9 @@ generate_password() {
     fi
 }
 
-# 获取端口
+# 获取端口配置与跳跃范围
 get_port() {
-    read -t 15 -p "回车或等待15秒为随机端口，或者自定义端口请输入(1-65535): " SERVER_PORT
+    read -t 15 -p "回车或等待15秒为随机端口，或者自定义主监听端口请输入(1-65535): " SERVER_PORT
     if [ -z "$SERVER_PORT" ]; then
         if command -v shuf &> /dev/null; then
             SERVER_PORT=$(shuf -i 2000-65000 -n 1)
@@ -136,6 +136,28 @@ get_port() {
         echo "错误: 端口必须是 1-65535 之间的数字"
         exit 1
     fi
+
+    echo -e "${CYAN}===== 端口跳跃 (Port Hopping) =====${RESET}"
+    echo "启用端口跳跃可以通过在指定端口范围内随机切换，有效防止运营商对单端口的 QoS 限速或阻断。"
+    read -p "是否启用端口跳跃功能? [y/N]: " ENABLE_PORT_HOP
+    if [[ "$ENABLE_PORT_HOP" =~ ^[Yy]$ ]]; then
+        while true; do
+            read -p "请输入端口跳跃的范围 (格式如 20000-50000): " PORT_HOP_RANGE
+            if [[ "$PORT_HOP_RANGE" =~ ^[0-9]+-[0-9]+$ ]]; then
+                PORT_START=$(echo "$PORT_HOP_RANGE" | cut -d'-' -f1)
+                PORT_END=$(echo "$PORT_HOP_RANGE" | cut -d'-' -f2)
+                if [ "$PORT_START" -ge 1 ] && [ "$PORT_END" -le 65535 ] && [ "$PORT_START" -lt "$PORT_END" ]; then
+                    PORT_RANGE_COLON="${PORT_START}:${PORT_END}"
+                    break
+                else
+                    echo -e "${RED}错误: 端口范围无效 (必须在 1-65535 之间，且起始端口需小于结束端口)${RESET}"
+                fi
+            else
+                echo -e "${RED}错误: 格式不正确，请输入形如 20000-50000 的范围${RESET}"
+            fi
+        done
+    fi
+    echo -e "${CYAN}===================================${RESET}"
 }
 
 # 智能检测并释放 80 端口
@@ -233,14 +255,49 @@ EOF
         systemctl daemon-reload
         systemctl enable hysteria-server.service
         systemctl restart hysteria-server.service
+        
+        # 配置端口跳跃防火墙规则
+        if [[ "$ENABLE_PORT_HOP" =~ ^[Yy]$ ]]; then
+            echo "配置并持久化端口跳跃防火墙规则..."
+            IPTABLES_PATH=$(command -v iptables)
+            IP6TABLES_PATH=$(command -v ip6tables || echo "/bin/true")
+            cat > /etc/systemd/system/hysteria-porthop.service << EOF
+[Unit]
+Description=Hysteria 2 Port Hopping iptables rules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${IPTABLES_PATH} -t nat -A PREROUTING -p udp --dport ${PORT_RANGE_COLON} -j REDIRECT --to-ports ${SERVER_PORT}
+ExecStart=-${IP6TABLES_PATH} -t nat -A PREROUTING -p udp --dport ${PORT_RANGE_COLON} -j REDIRECT --to-ports ${SERVER_PORT}
+ExecStop=${IPTABLES_PATH} -t nat -D PREROUTING -p udp --dport ${PORT_RANGE_COLON} -j REDIRECT --to-ports ${SERVER_PORT}
+ExecStop=-${IP6TABLES_PATH} -t nat -D PREROUTING -p udp --dport ${PORT_RANGE_COLON} -j REDIRECT --to-ports ${SERVER_PORT}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            systemctl daemon-reload
+            systemctl enable hysteria-porthop.service
+            systemctl restart hysteria-porthop.service
+            
+            CLIENT_SERVER_ADDR="${DOMAIN}:${PORT_HOP_RANGE}"
+            HOP_STATUS="已启用 (跳跃范围: ${PORT_HOP_RANGE} -> 主端口: ${SERVER_PORT})"
+        else
+            CLIENT_SERVER_ADDR="${DOMAIN}:${SERVER_PORT}"
+            HOP_STATUS="未启用"
+        fi
         sleep 2
     else
         echo "请手动启动 Hysteria2 服务"
+        CLIENT_SERVER_ADDR="${DOMAIN}:${SERVER_PORT}"
+        HOP_STATUS="未启用 (不支持 Systemd)"
     fi
 
     cat > /etc/hysteria/hyclient.json << EOF
 {
-  "server": "${DOMAIN}:${SERVER_PORT}",
+  "server": "${CLIENT_SERVER_ADDR}",
   "auth": "${HYSTERIA_PASSWORD}",
   "tls": {
     "sni": "${DOMAIN}",
@@ -265,9 +322,16 @@ check_service_status() {
     echo -e "${CYAN}===== 服务状态 =====${RESET}"
     if command -v systemctl &> /dev/null; then
         if systemctl is-active --quiet hysteria-server.service; then
-            echo -e "${GREEN}✓ Hysteria2 服务运行正常${RESET}"
+            echo -e "${GREEN}✓ Hysteria2 主服务运行正常${RESET}"
         else
-            echo -e "${RED}✗ Hysteria2 服务未运行，请执行 journalctl -u hysteria-server -e 查看日志${RESET}"
+            echo -e "${RED}✗ Hysteria2 主服务未运行，请执行 journalctl -u hysteria-server -e 查看日志${RESET}"
+        fi
+        if [[ "$ENABLE_PORT_HOP" =~ ^[Yy]$ ]]; then
+            if systemctl is-active --quiet hysteria-porthop.service; then
+                echo -e "${GREEN}✓ Hysteria2 端口跳跃防火墙规则已加载${RESET}"
+            else
+                echo -e "${RED}✗ Hysteria2 端口跳跃防火墙规则加载失败${RESET}"
+            fi
         fi
     fi
     echo -e "${CYAN}===================${RESET}"
@@ -275,14 +339,15 @@ check_service_status() {
 
 # 输出客户端配置
 show_client_config() {
-    local connection_link="${HYSTERIA_PASSWORD}@${DOMAIN}:${SERVER_PORT}/?sni=${DOMAIN}#${DOMAIN}"
+    local connection_link="${HYSTERIA_PASSWORD}@${CLIENT_SERVER_ADDR}/?sni=${DOMAIN}#${DOMAIN}"
 
     echo
     echo -e "${GREEN}===== Hysteria2 安装与配置完成 =====${RESET}"
     echo
     echo -e "${CYAN}=========== 配置参数 =============${RESET}"
     echo -e "服务器域名 (SNI): ${YELLOW}${DOMAIN}${RESET}"
-    echo -e "端口            : ${YELLOW}${SERVER_PORT}${RESET}"
+    echo -e "主监听端口      : ${YELLOW}${SERVER_PORT}${RESET}"
+    echo -e "端口跳跃状态    : ${YELLOW}${HOP_STATUS}${RESET}"
     echo -e "密码            : ${YELLOW}${HYSTERIA_PASSWORD}${RESET}"
     echo -e "服务端伪装站    : ${YELLOW}${MASQUERADE_URL}${RESET}"
     echo -e "QUIC Stream 窗口: ${YELLOW}${STREAM_RW}${RESET}"
@@ -297,7 +362,7 @@ show_client_config() {
     echo
 }
 
-# 彻底卸载 Hysteria2 及清理证书环境
+# 彻底卸载 Hysteria2 及清理环境
 uninstall_hysteria2() {
     echo -e "${YELLOW}开始执行 Hysteria2 彻底卸载程序...${RESET}"
     
@@ -306,6 +371,14 @@ uninstall_hysteria2() {
         systemctl stop hysteria-server.service 2>/dev/null || true
         systemctl disable hysteria-server.service 2>/dev/null || true
         rm -f /etc/systemd/system/hysteria-server.service
+        
+        # 移除端口跳跃守护进程及网络规则
+        if [ -f /etc/systemd/system/hysteria-porthop.service ]; then
+            systemctl stop hysteria-porthop.service 2>/dev/null || true
+            systemctl disable hysteria-porthop.service 2>/dev/null || true
+            rm -f /etc/systemd/system/hysteria-porthop.service
+        fi
+        
         systemctl daemon-reload
     fi
     
@@ -332,7 +405,7 @@ uninstall_hysteria2() {
     rm -f "$SCRIPT_PATH"
 
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${GREEN} 卸载完成！Hysteria 2、配置文件、证书环境及定时任务已彻底清除。${RESET}"
+    echo -e "${GREEN} 卸载完成！Hysteria 2、跳跃规则、配置文件、证书环境及定时任务已彻底清除。${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
     exit 0
 }
@@ -341,10 +414,10 @@ uninstall_hysteria2() {
 show_menu() {
     clear
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (Let's Encrypt 版)    ${RESET}"
+    echo -e "${GREEN}      Hysteria 2 一键部署与管理脚本 (包含端口跳跃防 QoS)  ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2"
-    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2"
+    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (支持端口跳跃与 Let's Encrypt 证书)"
+    echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2 (并删除本脚本)"
     echo -e "${CYAN} 0.${RESET} 退出脚本"
     echo -e "${GREEN}======================================================${RESET}"
     echo ""
@@ -356,7 +429,7 @@ show_menu() {
             install_hysteria2
             ;;
         2)
-            read -p "您确定要彻底卸载 Hysteria 2 并删除此脚本自身吗？[Y/N]: " confirm
+            read -p "您确定要彻底卸载 Hysteria 2 及其相关的防火墙规则并删除此脚本自身吗？[y/N]: " confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 uninstall_hysteria2
             else
