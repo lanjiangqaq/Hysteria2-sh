@@ -79,23 +79,29 @@ install_packages() {
     
     if command -v apt-get &> /dev/null; then
         apt-get update -y
-        apt-get install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute2
+        apt-get install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute2 cron
     elif command -v yum &> /dev/null; then
         yum update -y
         yum install -y epel-release
-        yum install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute
+        yum install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute cronie
     elif command -v dnf &> /dev/null; then
         dnf update -y
-        dnf install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute
+        dnf install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute cronie
     elif command -v zypper &> /dev/null; then
         zypper refresh
-        zypper install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute2
+        zypper install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute2 cron
     elif command -v pacman &> /dev/null; then
         pacman -Syu --noconfirm
-        pacman -S --noconfirm curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute2
+        pacman -S --noconfirm curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute2 cronie
     else
         echo "错误: 未找到支持的包管理器，请手动安装依赖。"
         exit 1
+    fi
+
+    # 确保 cron 服务启动并设置为开机自启
+    if command -v systemctl &> /dev/null; then
+        systemctl enable crond 2>/dev/null || systemctl enable cron 2>/dev/null
+        systemctl start crond 2>/dev/null || systemctl start cron 2>/dev/null
     fi
 }
 
@@ -157,7 +163,6 @@ check_domain_and_ip() {
     echo -e "${CYAN}===== 网络环境与真实 IP 强制检测 =====${RESET}"
     echo -e "${YELLOW}正在穿透 WARP 等虚拟网卡，探测本机物理公网 IP...${RESET}"
     
-    # 提取真实物理网卡 (排除 warp, wgcf, tailscale 等干扰)
     DEFAULT_IFACE=$(ip -4 route ls | awk '/default/ && !/wg|warp|tun|tailscale/ {print $5; exit}')
     if [ -z "$DEFAULT_IFACE" ]; then DEFAULT_IFACE=$(ip -4 route ls | awk '/default/ {print $5; exit}'); fi
 
@@ -168,7 +173,6 @@ check_domain_and_ip() {
     
     REAL_IPV6=$(curl -s --interface "$DEFAULT_IFACE_V6" -6 https://ipv6.icanhazip.com 2>/dev/null)
 
-    # 兜底机制
     if [ -z "$REAL_IPV4" ]; then REAL_IPV4=$(curl -s -4 https://ipv4.icanhazip.com 2>/dev/null); fi
     if [ -z "$REAL_IPV6" ]; then REAL_IPV6=$(curl -s -6 https://ipv6.icanhazip.com 2>/dev/null); fi
 
@@ -204,11 +208,9 @@ check_domain_and_ip() {
 prepare_acme_environment() {
     echo -e "${YELLOW}正在构建证书申请防阻断策略 (ACME Hooks)...${RESET}"
     
-    # 构建基础 Pre/Post Hooks：停止常见 Web 容器释放 80 端口
     ACME_PRE_HOOK="systemctl stop nginx 2>/dev/null || true; systemctl stop apache2 2>/dev/null || true; systemctl stop httpd 2>/dev/null || true; systemctl stop caddy 2>/dev/null || true;"
     ACME_POST_HOOK="systemctl start nginx 2>/dev/null || true; systemctl start apache2 2>/dev/null || true; systemctl start httpd 2>/dev/null || true; systemctl start caddy 2>/dev/null || true;"
 
-    # 动态检测并构建 WARP 规避策略 (防止不对称路由导致 Let's Encrypt 验证 TCP 超时)
     if command -v warp-cli &> /dev/null && warp-cli status 2>/dev/null | grep -qi "Connected"; then
         echo -e "${YELLOW}检测到官方 WARP 客户端正在运行！已将其纳入自动断开/恢复策略。${RESET}"
         ACME_PRE_HOOK="${ACME_PRE_HOOK} warp-cli disconnect >/dev/null 2>&1;"
@@ -225,7 +227,6 @@ prepare_acme_environment() {
         WGCF_TEMP_STOPPED=true
     fi
     
-    # 为当次申请立即释放本地 80 端口
     eval "$ACME_PRE_HOOK"
     if command -v lsof >/dev/null 2>&1; then
         PORT_80_PIDS=$(lsof -t -i:80 || true)
@@ -257,7 +258,6 @@ install_hysteria2() {
     echo "获取端口配置..."
     get_port
     
-    # 执行原生 IP 侦测与域名校验
     check_domain_and_ip
 
     echo "下载并安装 Hysteria2 官方核心..."
@@ -272,7 +272,6 @@ install_hysteria2() {
     fi
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
-    # 准备申请环境 (关停占用端口的程序及隔离 WARP)
     prepare_acme_environment
 
     echo "为 $DOMAIN 申请 TLS 证书..."
@@ -290,7 +289,6 @@ install_hysteria2() {
         --fullchain-file /etc/hysteria/server.crt \
         --reloadcmd "systemctl restart hysteria-server"
 
-    # 若前期断开了 WARP，在此时予以恢复
     restore_warp_if_needed
 
     if id hysteria &> /dev/null; then
@@ -333,7 +331,6 @@ EOF
         systemctl enable hysteria-server.service
         systemctl restart hysteria-server.service
         
-        # 配置端口跳跃防火墙规则
         if [[ "$ENABLE_PORT_HOP" =~ ^[Yy]$ ]]; then
             echo "加载并持久化端口跳跃 (iptables/ip6tables) 规则..."
             IPTABLES_PATH=$(command -v iptables)
@@ -393,7 +390,6 @@ check_service_status() {
 }
 
 show_client_config() {
-    # 构建符合标准解析格式的 URI 链接
     if [[ "$ENABLE_PORT_HOP" =~ ^[Yy]$ ]]; then
         local MPORT_PARAM="&mport=${PORT_HOP_RANGE}"
     else
@@ -424,7 +420,6 @@ uninstall_hysteria2() {
     echo -e "${YELLOW}开始执行 Hysteria2 彻底卸载与系统还原程序...${RESET}"
     
     if command -v systemctl &> /dev/null; then
-        # 1. 停止网络跳跃服务，自动触发 ExecStop 删除 iptables 转发规则
         if [ -f /etc/systemd/system/hysteria-porthop.service ]; then
             echo -e "${YELLOW}正在清理 iptables/ip6tables 端口转发防火墙规则...${RESET}"
             systemctl stop hysteria-porthop.service 2>/dev/null || true
@@ -432,7 +427,6 @@ uninstall_hysteria2() {
             rm -f /etc/systemd/system/hysteria-porthop.service
         fi
 
-        # 2. 停止 Hysteria 主程序服务
         systemctl stop hysteria-server.service 2>/dev/null || true
         systemctl disable hysteria-server.service 2>/dev/null || true
         rm -f /etc/systemd/system/hysteria-server.service
@@ -440,23 +434,19 @@ uninstall_hysteria2() {
         systemctl daemon-reload
     fi
     
-    # 3. 强制终止关联的残留进程
     if pgrep -f hysteria &> /dev/null; then
         pkill -f hysteria
     fi
     
-    # 4. 删除核心文件与配置目录
     rm -f /usr/local/bin/hysteria
     rm -rf /etc/hysteria
 
-    # 5. 卸载 acme.sh，清理证书及计划任务 (Crontab)
     echo -e "${YELLOW}正在清理 acme.sh 证书环境与自动续期任务...${RESET}"
     if [ -f "/root/.acme.sh/acme.sh" ]; then
         /root/.acme.sh/acme.sh --uninstall >/dev/null 2>&1
         rm -rf /root/.acme.sh
     fi
 
-    # 6. 销毁执行脚本自身
     SCRIPT_PATH=$(readlink -f "$0")
     rm -f "$SCRIPT_PATH"
 
