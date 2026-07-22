@@ -140,7 +140,10 @@ get_port() {
     read -p "是否启用端口跳跃功能? [y/N]: " ENABLE_PORT_HOP
     if [[ "$ENABLE_PORT_HOP" =~ ^[Yy]$ ]]; then
         while true; do
-            read -p "请输入端口跳跃的范围 (格式如 30000-50000): " PORT_HOP_RANGE
+            read -p "请输入端口跳跃的范围 (直接回车默认 30000-50000): " PORT_HOP_RANGE
+            if [ -z "$PORT_HOP_RANGE" ]; then
+                PORT_HOP_RANGE="30000-50000"
+            fi
             if [[ "$PORT_HOP_RANGE" =~ ^[0-9]+-[0-9]+$ ]]; then
                 PORT_START=$(echo "$PORT_HOP_RANGE" | cut -d'-' -f1)
                 PORT_END=$(echo "$PORT_HOP_RANGE" | cut -d'-' -f2)
@@ -204,6 +207,41 @@ check_domain_and_ip() {
     echo -e "${CYAN}======================================${RESET}"
 }
 
+# ================= 端口 80 环境处理 =================
+release_port_80() {
+    echo -e "${YELLOW}正在检测并释放 80 端口占用情况...${RESET}"
+    
+    # 停止常见的 Web 容器
+    systemctl stop nginx 2>/dev/null || true
+    systemctl stop apache2 2>/dev/null || true
+    systemctl stop httpd 2>/dev/null || true
+    systemctl stop caddy 2>/dev/null || true
+
+    # 强制杀死占用 80 端口的进程
+    if command -v lsof >/dev/null 2>&1; then
+        PORT_80_PIDS=$(lsof -t -i:80 || true)
+        if [ -n "$PORT_80_PIDS" ]; then
+            for pid in $PORT_80_PIDS; do
+                kill -9 "$pid" 2>/dev/null || true
+            done
+            sleep 2
+        fi
+    fi
+
+    # 自动配置防火墙放行 80 端口
+    echo -e "${YELLOW}正在配置防火墙放行 80 端口 (用于 Let's Encrypt 证书验证)...${RESET}"
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow 80/tcp >/dev/null 2>&1
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
+    fi
+}
+
 # ================= 证书申请环境准备 (避开 WARP 拦截) =================
 prepare_acme_environment() {
     echo -e "${YELLOW}正在构建证书申请防阻断策略 (ACME Hooks)...${RESET}"
@@ -228,15 +266,7 @@ prepare_acme_environment() {
     fi
     
     eval "$ACME_PRE_HOOK"
-    if command -v lsof >/dev/null 2>&1; then
-        PORT_80_PIDS=$(lsof -t -i:80 || true)
-        if [ -n "$PORT_80_PIDS" ]; then
-            for pid in $PORT_80_PIDS; do
-                kill -9 "$pid" 2>/dev/null || true
-            done
-            sleep 2
-        fi
-    fi
+    release_port_80
 }
 
 restore_warp_if_needed() {
