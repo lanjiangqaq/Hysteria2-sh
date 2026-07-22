@@ -1,6 +1,6 @@
 #!/bin/bash
 # Hysteria2 Automated Installation & Management Script (Production Edition)
-# Author: Modified for Production, Security & Port Hopping
+# Author: Modified for Production, Security, Port Hopping & WARP Bypass
 
 GREEN="\033[32m"
 RED="\033[31m"
@@ -79,20 +79,20 @@ install_packages() {
     
     if command -v apt-get &> /dev/null; then
         apt-get update -y
-        apt-get install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables
+        apt-get install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute2
     elif command -v yum &> /dev/null; then
         yum update -y
         yum install -y epel-release
-        yum install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables
+        yum install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute
     elif command -v dnf &> /dev/null; then
         dnf update -y
-        dnf install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables
+        dnf install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute
     elif command -v zypper &> /dev/null; then
         zypper refresh
-        zypper install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables
+        zypper install -y curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute2
     elif command -v pacman &> /dev/null; then
         pacman -Syu --noconfirm
-        pacman -S --noconfirm curl wget openssl gawk ca-certificates socat lsof psmisc iptables
+        pacman -S --noconfirm curl wget openssl gawk ca-certificates socat lsof psmisc iptables iproute2
     else
         echo "错误: 未找到支持的包管理器，请手动安装依赖。"
         exit 1
@@ -152,13 +152,81 @@ get_port() {
     echo -e "${CYAN}===================================${RESET}"
 }
 
-release_port_80() {
-    echo -e "${YELLOW}正在检测并释放 80 端口占用情况...${RESET}"
-    systemctl stop nginx 2>/dev/null || true
-    systemctl stop apache2 2>/dev/null || true
-    systemctl stop httpd 2>/dev/null || true
-    systemctl stop caddy 2>/dev/null || true
+# ================= 真实 IP 探测与域名校验 =================
+check_domain_and_ip() {
+    echo -e "${CYAN}===== 网络环境与真实 IP 强制检测 =====${RESET}"
+    echo -e "${YELLOW}正在穿透 WARP 等虚拟网卡，探测本机物理公网 IP...${RESET}"
+    
+    # 提取真实物理网卡 (排除 warp, wgcf, tailscale 等干扰)
+    DEFAULT_IFACE=$(ip -4 route ls | awk '/default/ && !/wg|warp|tun|tailscale/ {print $5; exit}')
+    if [ -z "$DEFAULT_IFACE" ]; then DEFAULT_IFACE=$(ip -4 route ls | awk '/default/ {print $5; exit}'); fi
 
+    REAL_IPV4=$(curl -s --interface "$DEFAULT_IFACE" -4 https://ipv4.icanhazip.com 2>/dev/null)
+    
+    DEFAULT_IFACE_V6=$(ip -6 route ls | awk '/default/ && !/wg|warp|tun|tailscale/ {print $5; exit}')
+    if [ -z "$DEFAULT_IFACE_V6" ]; then DEFAULT_IFACE_V6=$(ip -6 route ls | awk '/default/ {print $5; exit}'); fi
+    
+    REAL_IPV6=$(curl -s --interface "$DEFAULT_IFACE_V6" -6 https://ipv6.icanhazip.com 2>/dev/null)
+
+    # 兜底机制
+    if [ -z "$REAL_IPV4" ]; then REAL_IPV4=$(curl -s -4 https://ipv4.icanhazip.com 2>/dev/null); fi
+    if [ -z "$REAL_IPV6" ]; then REAL_IPV6=$(curl -s -6 https://ipv6.icanhazip.com 2>/dev/null); fi
+
+    echo -e "物理网卡 IPv4: ${GREEN}${REAL_IPV4:-未分配}${RESET}"
+    echo -e "物理网卡 IPv6: ${GREEN}${REAL_IPV6:-未分配}${RESET}"
+
+    echo -e "${YELLOW}正在通过公共 DNS 请求 $DOMAIN 的解析记录...${RESET}"
+    DOMAIN_IPV4=$(curl -sH "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=$DOMAIN&type=A" | grep -oP '(?<="data":")[^"]*' | head -n 1)
+    DOMAIN_IPV6=$(curl -sH "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=$DOMAIN&type=AAAA" | grep -oP '(?<="data":")[^"]*' | head -n 1)
+
+    echo -e "域名解析 IPv4: ${GREEN}${DOMAIN_IPV4:-未解析}${RESET}"
+    echo -e "域名解析 IPv6: ${GREEN}${DOMAIN_IPV6:-未解析}${RESET}"
+
+    MATCH=false
+    if [ -n "$REAL_IPV4" ] && [ "$REAL_IPV4" == "$DOMAIN_IPV4" ]; then MATCH=true; fi
+    if [ -n "$REAL_IPV6" ] && [ "$REAL_IPV6" == "$DOMAIN_IPV6" ]; then MATCH=true; fi
+
+    if [ "$MATCH" = true ]; then
+        echo -e "${GREEN}✓ 域名解析强制校验通过！记录正确指向了本机的原生物理 IP。${RESET}"
+    else
+        echo -e "${RED}✗ 警告: 域名解析的 IP 与本机原生物理 IP 不匹配！${RESET}"
+        echo -e "注意: acme.sh 证书申请必须指向物理 IP。如果您刚刚修改过解析，请等待生效；若开启了 CDN 代理(小黄云)，请务必关闭。如果您将域名指向了 WARP 虚拟 IP，请立即修正。"
+        read -p "是否强制继续尝试申请证书？(极大概率失败) [y/N]: " FORCE_CONTINUE
+        if [[ ! "$FORCE_CONTINUE" =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}已终止安装。请修正 DNS 解析设置后再试。${RESET}"
+            exit 1
+        fi
+    fi
+    echo -e "${CYAN}======================================${RESET}"
+}
+
+# ================= 证书申请环境准备 (避开 WARP 拦截) =================
+prepare_acme_environment() {
+    echo -e "${YELLOW}正在构建证书申请防阻断策略 (ACME Hooks)...${RESET}"
+    
+    # 构建基础 Pre/Post Hooks：停止常见 Web 容器释放 80 端口
+    ACME_PRE_HOOK="systemctl stop nginx 2>/dev/null || true; systemctl stop apache2 2>/dev/null || true; systemctl stop httpd 2>/dev/null || true; systemctl stop caddy 2>/dev/null || true;"
+    ACME_POST_HOOK="systemctl start nginx 2>/dev/null || true; systemctl start apache2 2>/dev/null || true; systemctl start httpd 2>/dev/null || true; systemctl start caddy 2>/dev/null || true;"
+
+    # 动态检测并构建 WARP 规避策略 (防止不对称路由导致 Let's Encrypt 验证 TCP 超时)
+    if command -v warp-cli &> /dev/null && warp-cli status 2>/dev/null | grep -qi "Connected"; then
+        echo -e "${YELLOW}检测到官方 WARP 客户端正在运行！已将其纳入自动断开/恢复策略。${RESET}"
+        ACME_PRE_HOOK="${ACME_PRE_HOOK} warp-cli disconnect >/dev/null 2>&1;"
+        ACME_POST_HOOK="${ACME_POST_HOOK} warp-cli connect >/dev/null 2>&1;"
+        warp-cli disconnect >/dev/null 2>&1
+        WARP_CLI_TEMP_STOPPED=true
+    fi
+
+    if command -v wg-quick &> /dev/null && ip link show wgcf &> /dev/null; then
+        echo -e "${YELLOW}检测到 wgcf (WireGuard WARP) 正在运行！已将其纳入自动断开/恢复策略。${RESET}"
+        ACME_PRE_HOOK="${ACME_PRE_HOOK} wg-quick down wgcf >/dev/null 2>&1;"
+        ACME_POST_HOOK="${ACME_POST_HOOK} wg-quick up wgcf >/dev/null 2>&1;"
+        wg-quick down wgcf >/dev/null 2>&1
+        WGCF_TEMP_STOPPED=true
+    fi
+    
+    # 为当次申请立即释放本地 80 端口
+    eval "$ACME_PRE_HOOK"
     if command -v lsof >/dev/null 2>&1; then
         PORT_80_PIDS=$(lsof -t -i:80 || true)
         if [ -n "$PORT_80_PIDS" ]; then
@@ -167,6 +235,15 @@ release_port_80() {
             done
             sleep 2
         fi
+    fi
+}
+
+restore_warp_if_needed() {
+    if [ "$WARP_CLI_TEMP_STOPPED" = true ]; then
+        warp-cli connect >/dev/null 2>&1
+    fi
+    if [ "$WGCF_TEMP_STOPPED" = true ]; then
+        wg-quick up wgcf >/dev/null 2>&1
     fi
 }
 
@@ -179,6 +256,9 @@ install_hysteria2() {
     generate_password
     echo "获取端口配置..."
     get_port
+    
+    # 执行原生 IP 侦测与域名校验
+    check_domain_and_ip
 
     echo "下载并安装 Hysteria2 官方核心..."
     if ! bash <(curl -fsSL https://get.hy2.sh/); then
@@ -192,11 +272,15 @@ install_hysteria2() {
     fi
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
-    release_port_80
+    # 准备申请环境 (关停占用端口的程序及隔离 WARP)
+    prepare_acme_environment
 
     echo "为 $DOMAIN 申请 TLS 证书..."
-    if ! /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone -k ec-256; then
-        echo -e "${RED}错误: 证书申请失败，请确认域名已正确输入且解析至本机。${RESET}"
+    if ! /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone -k ec-256 \
+        --pre-hook "$ACME_PRE_HOOK" \
+        --post-hook "$ACME_POST_HOOK"; then
+        echo -e "${RED}错误: 证书申请失败。请检查 80 端口是否完全放行。${RESET}"
+        restore_warp_if_needed
         exit 1
     fi
 
@@ -205,6 +289,9 @@ install_hysteria2() {
         --key-file /etc/hysteria/server.key \
         --fullchain-file /etc/hysteria/server.crt \
         --reloadcmd "systemctl restart hysteria-server"
+
+    # 若前期断开了 WARP，在此时予以恢复
+    restore_warp_if_needed
 
     if id hysteria &> /dev/null; then
         chown -R hysteria:hysteria /etc/hysteria
@@ -383,9 +470,9 @@ uninstall_hysteria2() {
 show_menu() {
     clear
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${GREEN}      Hysteria 2 自动化部署与管理脚本 (防 QoS 版)         ${RESET}"
+    echo -e "${GREEN}      Hysteria 2 自动化部署与管理脚本 (满血增强版)        ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (支持端口跳跃与 Let's Encrypt 证书)"
+    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (支持端口跳跃 / 原生 IP 侦测 / WARP 防干扰)"
     echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2 (彻底清理规则与环境)"
     echo -e "${CYAN} 0.${RESET} 退出脚本"
     echo -e "${GREEN}======================================================${RESET}"
