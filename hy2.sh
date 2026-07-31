@@ -1,6 +1,6 @@
 #!/bin/bash
 # Hysteria2 Automated Installation & Management Script (Production Edition)
-# Author: Modified for Production, Security, Port Hopping & IPv6 Firewall Fix
+# Author: Modified for Production, Security, Port Hopping & Native IPv6-Only Support
 
 GREEN="\033[32m"
 RED="\033[31m"
@@ -160,43 +160,49 @@ get_port() {
     echo -e "${CYAN}===================================${RESET}"
 }
 
-# ================= 真实 IP 探测与域名校验 =================
+# ================= 真实 IP 探测与智能双栈校验 =================
 check_domain_and_ip() {
     echo -e "${CYAN}===== 网络环境与真实 IP 强制检测 =====${RESET}"
     echo -e "${YELLOW}正在穿透 WARP 等虚拟网卡，探测本机物理公网 IP...${RESET}"
     
-    DEFAULT_IFACE=$(ip -4 route ls | awk '/default/ && !/wg|warp|tun|tailscale/ {print $5; exit}')
-    if [ -z "$DEFAULT_IFACE" ]; then DEFAULT_IFACE=$(ip -4 route ls | awk '/default/ {print $5; exit}'); fi
-
-    REAL_IPV4=$(curl -s --interface "$DEFAULT_IFACE" -4 https://ipv4.icanhazip.com 2>/dev/null)
+    DEFAULT_IFACE_V4=$(ip -4 route ls | awk '/default/ && !/wg|warp|tun|tailscale/ {print $5; exit}')
+    if [ -z "$DEFAULT_IFACE_V4" ]; then DEFAULT_IFACE_V4=$(ip -4 route ls | awk '/default/ {print $5; exit}'); fi
+    REAL_IPV4=$(curl -s --interface "$DEFAULT_IFACE_V4" -4 https://ipv4.icanhazip.com 2>/dev/null)
     
     DEFAULT_IFACE_V6=$(ip -6 route ls | awk '/default/ && !/wg|warp|tun|tailscale/ {print $5; exit}')
     if [ -z "$DEFAULT_IFACE_V6" ]; then DEFAULT_IFACE_V6=$(ip -6 route ls | awk '/default/ {print $5; exit}'); fi
-    
     REAL_IPV6=$(curl -s --interface "$DEFAULT_IFACE_V6" -6 https://ipv6.icanhazip.com 2>/dev/null)
 
+    # 兜底获取
     if [ -z "$REAL_IPV4" ]; then REAL_IPV4=$(curl -s -4 https://ipv4.icanhazip.com 2>/dev/null); fi
     if [ -z "$REAL_IPV6" ]; then REAL_IPV6=$(curl -s -6 https://ipv6.icanhazip.com 2>/dev/null); fi
 
-    echo -e "物理网卡 IPv4: ${GREEN}${REAL_IPV4:-未分配}${RESET}"
-    echo -e "物理网卡 IPv6: ${GREEN}${REAL_IPV6:-未分配}${RESET}"
+    echo -e "物理网卡 IPv4: ${GREEN}${REAL_IPV4:-无 (IPv6-Only 环境)}${RESET}"
+    echo -e "物理网卡 IPv6: ${GREEN}${REAL_IPV6:-无}${RESET}"
 
     echo -e "${YELLOW}正在通过公共 DNS 请求 $DOMAIN 的解析记录...${RESET}"
     DOMAIN_IPV4=$(curl -sH "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=$DOMAIN&type=A" | grep -oP '(?<="data":")[^"]*' | head -n 1)
     DOMAIN_IPV6=$(curl -sH "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=$DOMAIN&type=AAAA" | grep -oP '(?<="data":")[^"]*' | head -n 1)
 
-    echo -e "域名解析 IPv4: ${GREEN}${DOMAIN_IPV4:-未解析}${RESET}"
-    echo -e "域名解析 IPv6: ${GREEN}${DOMAIN_IPV6:-未解析}${RESET}"
+    echo -e "域名解析 IPv4 (A 记录): ${GREEN}${DOMAIN_IPV4:-未解析}${RESET}"
+    echo -e "域名解析 IPv6 (AAAA记录): ${GREEN}${DOMAIN_IPV6:-未解析}${RESET}"
 
+    ACME_LISTEN_PARAM=""
     MATCH=false
-    if [ -n "$REAL_IPV4" ] && [ "$REAL_IPV4" == "$DOMAIN_IPV4" ]; then MATCH=true; fi
-    if [ -n "$REAL_IPV6" ] && [ "$REAL_IPV6" == "$DOMAIN_IPV6" ]; then MATCH=true; fi
+    
+    # IPv6-Only 核心逻辑验证
+    if [ -n "$REAL_IPV6" ] && [ "$REAL_IPV6" == "$DOMAIN_IPV6" ]; then
+        MATCH=true
+        ACME_LISTEN_PARAM="--listen-v6"
+        echo -e "${GREEN}✓ 域名 AAAA 记录正确指向本机 IPv6。已开启纯 IPv6 证书申请模式！${RESET}"
+    elif [ -n "$REAL_IPV4" ] && [ "$REAL_IPV4" == "$DOMAIN_IPV4" ]; then
+        MATCH=true
+        echo -e "${GREEN}✓ 域名 A 记录正确指向本机 IPv4。${RESET}"
+    fi
 
-    if [ "$MATCH" = true ]; then
-        echo -e "${GREEN}✓ 域名解析强制校验通过！记录正确指向了本机的原生物理 IP。${RESET}"
-    else
-        echo -e "${RED}✗ 警告: 域名解析的 IP 与本机原生物理 IP 不匹配！${RESET}"
-        echo -e "注意: acme.sh 证书申请必须指向物理 IP。如果您刚刚修改过解析，请等待生效；若开启了 CDN 代理(小黄云)，请务必关闭。如果您将域名指向了 WARP 虚拟 IP，请立即修正。"
+    if [ "$MATCH" != true ]; then
+        echo -e "${RED}✗ 警告: 域名解析的 IP 与本机物理 IP 不匹配！${RESET}"
+        echo -e "请确保您在域名托管商处正确填写了服务器 IP。如果是纯 IPv6 服务器，必须填写 AAAA 记录，且关闭 Cloudflare 的小黄云代理。"
         read -p "是否强制继续尝试申请证书？(极大概率失败) [y/N]: " FORCE_CONTINUE
         if [[ ! "$FORCE_CONTINUE" =~ ^[Yy]$ ]]; then
             echo -e "${YELLOW}已终止安装。请修正 DNS 解析设置后再试。${RESET}"
@@ -206,7 +212,7 @@ check_domain_and_ip() {
     echo -e "${CYAN}======================================${RESET}"
 }
 
-# ================= 端口 80 环境处理 =================
+# ================= 端口 80 环境处理 (含 ip6tables) =================
 release_port_80() {
     echo -e "${YELLOW}正在检测并释放 80 端口占用情况...${RESET}"
     
@@ -225,7 +231,7 @@ release_port_80() {
         fi
     fi
 
-    echo -e "${YELLOW}正在配置防火墙放行 80 端口 (IPv4 & IPv6)...${RESET}"
+    echo -e "${YELLOW}正在配置防火墙放行双栈 80 端口 (用于 Let's Encrypt 证书验证)...${RESET}"
     if command -v ufw >/dev/null 2>&1; then
         ufw allow 80/tcp >/dev/null 2>&1
     fi
@@ -236,7 +242,6 @@ release_port_80() {
     if command -v iptables >/dev/null 2>&1; then
         iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
     fi
-    # 增加 IPv6 的 80 端口防火墙放行
     if command -v ip6tables >/dev/null 2>&1; then
         ip6tables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
     fi
@@ -288,6 +293,7 @@ install_hysteria2() {
     echo "获取端口配置..."
     get_port
     
+    # 执行原生 IP 侦测与域名校验，自动赋值 ACME_LISTEN_PARAM
     check_domain_and_ip
 
     echo "下载并安装 Hysteria2 官方核心..."
@@ -307,10 +313,11 @@ install_hysteria2() {
     prepare_acme_environment
 
     echo "为 $DOMAIN 申请 TLS 证书..."
-    if ! /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone -k ec-256 \
+    # 动态插入 $ACME_LISTEN_PARAM，如果是 IPv6-Only 将自动带入 --listen-v6 参数
+    if ! /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone $ACME_LISTEN_PARAM -k ec-256 \
         --pre-hook "$ACME_PRE_HOOK" \
         --post-hook "$ACME_POST_HOOK"; then
-        echo -e "${RED}错误: 证书申请失败。请检查 80 端口是否完全放行以及域名解析状态。${RESET}"
+        echo -e "${RED}错误: 证书申请失败。请确认 80 端口完全开放且域名解析状态正确无代理。${RESET}"
         restore_warp_if_needed
         exit 1
     fi
@@ -333,6 +340,7 @@ install_hysteria2() {
     CONN_RW=$(awk -v min=33554432 -v max=83886080 'BEGIN{srand(); print int(min+rand()*(max-min+1))}')
 
     echo "创建 Hysteria2 服务端配置文件..."
+    # 默认使用 :$SERVER_PORT 语法，Hysteria 2 会自动绑定双栈 ( [::]:PORT )，完美支持 IPv6
     cat > /etc/hysteria/config.yaml << EOF
 listen: :$SERVER_PORT
 
@@ -492,9 +500,9 @@ uninstall_hysteria2() {
 show_menu() {
     clear
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${GREEN}      Hysteria 2 自动化部署与管理脚本 (满血增强版)        ${RESET}"
+    echo -e "${GREEN}      Hysteria 2 自动化部署与管理脚本 (IPv6-Only 满血版)  ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (支持端口跳跃 / 原生 IP 侦测 / WARP 防干扰)"
+    echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (原生支持 IPv6/IPv4 智能感知识别)"
     echo -e "${CYAN} 2.${RESET} 彻底卸载 Hysteria 2 (彻底清理规则与环境)"
     echo -e "${CYAN} 0.${RESET} 退出脚本"
     echo -e "${GREEN}======================================================${RESET}"
