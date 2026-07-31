@@ -52,12 +52,13 @@ get_user_input() {
         fi
     done
 
+    # 增加严格的邮箱格式正则校验
     while true; do
-        read -p "请输入您的邮箱 (用于接收证书到期通知): " EMAIL
-        if [ -n "$EMAIL" ]; then
+        read -p "请输入您的合法邮箱 (用于接收证书到期通知，例如 admin@example.com): " EMAIL
+        if [[ -n "$EMAIL" && "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
             break
         else
-            echo -e "${RED}错误: 邮箱不能为空，请重新输入。${RESET}"
+            echo -e "${RED}错误: 邮箱格式不合法，请重新输入标准的邮箱地址。${RESET}"
         fi
     done
     
@@ -300,7 +301,10 @@ install_hysteria2() {
     if [ ! -f "/root/.acme.sh/acme.sh" ]; then
         curl https://get.acme.sh | sh -s email="$EMAIL"
     fi
+    
+    # 强制将证书申请服务器指向 Let's Encrypt，并强制注册传入的合法邮箱，解决历史错误缓存
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+    /root/.acme.sh/acme.sh --register-account -m "$EMAIL" --server letsencrypt >/dev/null 2>&1
 
     prepare_acme_environment
 
@@ -308,7 +312,7 @@ install_hysteria2() {
     if ! /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone -k ec-256 \
         --pre-hook "$ACME_PRE_HOOK" \
         --post-hook "$ACME_POST_HOOK"; then
-        echo -e "${RED}错误: 证书申请失败。请检查 80 端口是否完全放行。${RESET}"
+        echo -e "${RED}错误: 证书申请失败。请检查 80 端口是否完全放行以及域名解析状态。${RESET}"
         restore_warp_if_needed
         exit 1
     fi
