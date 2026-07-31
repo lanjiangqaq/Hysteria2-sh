@@ -1,6 +1,6 @@
 #!/bin/bash
 # Hysteria2 Automated Installation & Management Script (Production Edition)
-# Author: Modified for Production, Security, Port Hopping & WARP Bypass
+# Author: Modified for Production, Security, Port Hopping & IPv6 Firewall Fix
 
 GREEN="\033[32m"
 RED="\033[31m"
@@ -52,7 +52,6 @@ get_user_input() {
         fi
     done
 
-    # 增加严格的邮箱格式正则校验
     while true; do
         read -p "请输入您的合法邮箱 (用于接收证书到期通知，例如 admin@example.com): " EMAIL
         if [[ -n "$EMAIL" && "$EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
@@ -99,7 +98,6 @@ install_packages() {
         exit 1
     fi
 
-    # 确保 cron 服务启动并设置为开机自启
     if command -v systemctl &> /dev/null; then
         systemctl enable crond 2>/dev/null || systemctl enable cron 2>/dev/null
         systemctl start crond 2>/dev/null || systemctl start cron 2>/dev/null
@@ -212,13 +210,11 @@ check_domain_and_ip() {
 release_port_80() {
     echo -e "${YELLOW}正在检测并释放 80 端口占用情况...${RESET}"
     
-    # 停止常见的 Web 容器
     systemctl stop nginx 2>/dev/null || true
     systemctl stop apache2 2>/dev/null || true
     systemctl stop httpd 2>/dev/null || true
     systemctl stop caddy 2>/dev/null || true
 
-    # 强制杀死占用 80 端口的进程
     if command -v lsof >/dev/null 2>&1; then
         PORT_80_PIDS=$(lsof -t -i:80 || true)
         if [ -n "$PORT_80_PIDS" ]; then
@@ -229,8 +225,7 @@ release_port_80() {
         fi
     fi
 
-    # 自动配置防火墙放行 80 端口
-    echo -e "${YELLOW}正在配置防火墙放行 80 端口 (用于 Let's Encrypt 证书验证)...${RESET}"
+    echo -e "${YELLOW}正在配置防火墙放行 80 端口 (IPv4 & IPv6)...${RESET}"
     if command -v ufw >/dev/null 2>&1; then
         ufw allow 80/tcp >/dev/null 2>&1
     fi
@@ -241,9 +236,13 @@ release_port_80() {
     if command -v iptables >/dev/null 2>&1; then
         iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
     fi
+    # 增加 IPv6 的 80 端口防火墙放行
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
+    fi
 }
 
-# ================= 证书申请环境准备 (避开 WARP 拦截) =================
+# ================= 证书申请环境准备 =================
 prepare_acme_environment() {
     echo -e "${YELLOW}正在构建证书申请防阻断策略 (ACME Hooks)...${RESET}"
     
@@ -302,7 +301,6 @@ install_hysteria2() {
         curl https://get.acme.sh | sh -s email="$EMAIL"
     fi
     
-    # 强制将证书申请服务器指向 Let's Encrypt，并强制注册传入的合法邮箱，解决历史错误缓存
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
     /root/.acme.sh/acme.sh --register-account -m "$EMAIL" --server letsencrypt >/dev/null 2>&1
 
