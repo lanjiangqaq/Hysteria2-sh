@@ -1,6 +1,6 @@
 #!/bin/bash
 # Hysteria2 Automated Installation & Management Script (IPv4 Edition)
-# Author: Modified for Production, Security, Port Hopping & Force IPv4
+# Author: Modified for Production, Security, Port Hopping & Force IPv4 (Fixed DNS Parser)
 
 GREEN="\033[32m"
 RED="\033[31m"
@@ -160,7 +160,7 @@ get_port() {
     echo -e "${CYAN}===================================${RESET}"
 }
 
-# ================= 真实 IP 探测与域名校验 (针对 IPv4) =================
+# ================= 真实 IP 探测与域名校验 (修复 DNS 解析误判) =================
 check_domain_and_ip() {
     echo -e "${CYAN}===== 网络环境与真实 IP 强制检测 =====${RESET}"
     echo -e "${YELLOW}正在穿透虚拟网卡，探测本机物理公网 IPv4...${RESET}"
@@ -173,15 +173,16 @@ check_domain_and_ip() {
     echo -e "物理网卡 IPv4: ${GREEN}${REAL_IPV4:-未分配}${RESET}"
 
     echo -e "${YELLOW}正在通过公共 DNS 请求 $DOMAIN 的解析记录...${RESET}"
-    DOMAIN_IPV4=$(curl -sH "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=$DOMAIN&type=A" | grep -oP '(?<="data":")[^"]*' | head -n 1)
-    DOMAIN_IPV6=$(curl -sH "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=$DOMAIN&type=AAAA" | grep -oP '(?<="data":")[^"]*' | head -n 1)
+    
+    # 使用严谨的正则匹配，彻底排除 SOA 记录干扰，只抓取合法的 IPv4/IPv6 格式
+    DOMAIN_IPV4=$(curl -sH "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=$DOMAIN&type=A" | grep -oP '(?<="data":")[^"]*' | grep -E "^([0-9]{1,3}\.){3}[0-9]{1,3}$" | head -n 1)
+    DOMAIN_IPV6=$(curl -sH "accept: application/dns-json" "https://cloudflare-dns.com/dns-query?name=$DOMAIN&type=AAAA" | grep -oP '(?<="data":")[^"]*' | grep -E "^[0-9a-fA-F:]+$" | head -n 1)
 
     echo -e "域名解析 IPv4: ${GREEN}${DOMAIN_IPV4:-未解析}${RESET}"
     
-    # 严格拦截 AAAA 记录
     if [ -n "$DOMAIN_IPV6" ]; then
         echo -e "${RED}========================================================================${RESET}"
-        echo -e "${RED} 严重警告: 您的域名仍然配置了 AAAA (IPv6) 解析记录: ${DOMAIN_IPV6} ${RESET}"
+        echo -e "${RED} 严重警告: 您的域名仍然配置了真实的 AAAA (IPv6) 解析记录: ${DOMAIN_IPV6} ${RESET}"
         echo -e "${RED} 因为您的 VPS 是纯 IPv4 环境，该记录必定导致证书申请超时，客户端也无法连接！${RESET}"
         echo -e "${RED} 请务必前往 Cloudflare 删除所有 AAAA 记录，等待1-2分钟后再试。${RESET}"
         echo -e "${RED}========================================================================${RESET}"
@@ -298,7 +299,6 @@ install_hysteria2() {
     prepare_acme_environment
 
     echo "为 $DOMAIN 申请 TLS 证书 (强制开启 IPv4 监听模式)..."
-    # 使用 --listen-v4 强制独立服务器模式走 IPv4，避免串网超时
     if ! /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --listen-v4 -k ec-256 \
         --pre-hook "$ACME_PRE_HOOK" \
         --post-hook "$ACME_POST_HOOK"; then
