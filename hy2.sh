@@ -1,6 +1,6 @@
 #!/bin/bash
-# Hysteria2 Automated Installation & Management Script (IPv4 完善防断流版)
-# 特性: 端口跳跃 / NAT 防断流调优 / 强制 IPv4 / 彻底无痕卸载
+# Hysteria2 Automated Installation & Management Script (IPv4 终极防断流与无痕卸载版 - BBR 安全保护)
+# 特性: 端口跳跃 / NAT 防断流调优 / 强制 IPv4 / 深度无痕级卸载 / 保护系统原有 BBR 配置
 
 GREEN="\033[32m"
 RED="\033[31m"
@@ -200,7 +200,7 @@ check_domain_and_ip() {
     echo -e "${CYAN}======================================${RESET}"
 }
 
-# ================= 防火墙放行与内核防断流优化 =================
+# ================= 防火墙放行与专有 NAT 防断流优化 =================
 config_firewall_and_nat() {
     echo -e "${YELLOW}正在检测并释放 80 端口占用情况...${RESET}"
     systemctl stop nginx 2>/dev/null || true
@@ -242,16 +242,16 @@ config_firewall_and_nat() {
         fi
     fi
 
-    # 专门针对端口跳跃特性的 NAT 连接跟踪表优化（防断流核心）
+    # 仅针对 UDP 连接跟踪表进行隔离优化，绝不触碰 TCP 拥塞控制与 BBR
     if [[ "$ENABLE_PORT_HOP" =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}正在优化内核 NAT 连接跟踪表 (防断流与防溢出机制)...${RESET}"
+        echo -e "${YELLOW}正在优化 UDP 连接跟踪参数 (防断流机制，不影响现有 BBR)...${RESET}"
         cat > /etc/sysctl.d/99-hysteria-nat.conf << EOF
 net.netfilter.nf_conntrack_max = 2097152
 net.netfilter.nf_conntrack_udp_timeout = 60
 net.netfilter.nf_conntrack_udp_timeout_stream = 180
 EOF
         modprobe nf_conntrack 2>/dev/null || true
-        sysctl --system >/dev/null 2>&1
+        sysctl -p /etc/sysctl.d/99-hysteria-nat.conf >/dev/null 2>&1
     fi
 }
 
@@ -341,6 +341,7 @@ DOMAIN=$DOMAIN
 SERVER_PORT=$SERVER_PORT
 ENABLE_PORT_HOP=$ENABLE_PORT_HOP
 PORT_HOP_RANGE=$PORT_HOP_RANGE
+PORT_RANGE_COLON=$PORT_RANGE_COLON
 EOF
 
     echo "启动 Hysteria2 服务及配置网络规则..."
@@ -429,78 +430,138 @@ show_client_config() {
     echo
 }
 
-# ================= 彻底卸载与环境清理 =================
+# ================= 彻底卸载与环境清理 (深度无痕且不影响系统 BBR) =================
 uninstall_hysteria2() {
     echo -e "${YELLOW}开始执行 Hysteria2 彻底无痕卸载程序...${RESET}"
 
+    # 1. 提取安装信息
     if [ -f /etc/hysteria/.install_info ]; then
         # shellcheck disable=SC1091
         source /etc/hysteria/.install_info
     fi
 
+    # 2. 彻底清理端口跳跃 Systemd 服务
     if command -v systemctl &> /dev/null; then
-        if [ -f /etc/systemd/system/hysteria-porthop.service ]; then
-            echo -e "${YELLOW}正在清理 iptables 端口转发网络规则...${RESET}"
-            systemctl stop hysteria-porthop.service 2>/dev/null || true
-            systemctl disable hysteria-porthop.service 2>/dev/null || true
-            rm -f /etc/systemd/system/hysteria-porthop.service
-        fi
+        echo -e "${YELLOW}正在清理端口跳跃守护进程及规则...${RESET}"
+        systemctl stop hysteria-porthop.service 2>/dev/null || true
+        systemctl disable hysteria-porthop.service 2>/dev/null || true
+        rm -f /etc/systemd/system/hysteria-porthop.service
+        rm -f /etc/systemd/system/multi-user.target.wants/hysteria-porthop.service
+    fi
 
-        if [ -n "$PORT_HOP_RANGE" ] && [ -n "$SERVER_PORT" ]; then
-            PORT_START=$(echo "$PORT_HOP_RANGE" | cut -d'-' -f1)
-            PORT_END=$(echo "$PORT_HOP_RANGE" | cut -d'-' -f2)
-            if [ -n "$PORT_START" ] && [ -n "$PORT_END" ]; then
-                iptables -t nat -D PREROUTING -p udp --dport "${PORT_START}:${PORT_END}" -j REDIRECT --to-ports "${SERVER_PORT}" 2>/dev/null || true
-            fi
-        fi
+    # 3. 动态遍历清除 iptables / ufw / firewalld 所有残余网络规则
+    echo -e "${YELLOW}正在物理清空系统防火墙与 NAT 转发规则...${RESET}"
+    if command -v iptables &> /dev/null; then
+        while iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "REDIRECT"; do
+            RULE_NUM=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep "REDIRECT" | head -n 1 | awk '{print $1}')
+            iptables -t nat -D PREROUTING "$RULE_NUM" 2>/dev/null || break
+        done
 
-        echo -e "${YELLOW}正在中止 Hysteria2 系统级守护进程...${RESET}"
+        if [ -n "$SERVER_PORT" ]; then
+            iptables -D INPUT -p udp --dport "$SERVER_PORT" -j ACCEPT 2>/dev/null || true
+        fi
+        if [ -n "$PORT_RANGE_COLON" ]; then
+            iptables -D INPUT -p udp --dport "$PORT_RANGE_COLON" -j ACCEPT 2>/dev/null || true
+        fi
+        iptables -D INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+    fi
+
+    if command -v ufw &> /dev/null && ufw status | grep -qw "active"; then
+        ufw delete allow 80/tcp >/dev/null 2>&1 || true
+        if [ -n "$SERVER_PORT" ]; then
+            ufw delete allow "${SERVER_PORT}/udp" >/dev/null 2>&1 || true
+        fi
+        if [ -n "$PORT_RANGE_COLON" ]; then
+            ufw delete allow "${PORT_RANGE_COLON}/udp" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
+        firewall-cmd --permanent --remove-port=80/tcp >/dev/null 2>&1 || true
+        if [ -n "$SERVER_PORT" ]; then
+            firewall-cmd --permanent --remove-port="${SERVER_PORT}/udp" >/dev/null 2>&1 || true
+        fi
+        if [ -n "$PORT_HOP_RANGE" ]; then
+            firewall-cmd --permanent --remove-port="${PORT_HOP_RANGE}/udp" >/dev/null 2>&1 || true
+        fi
+        firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+
+    # 4. 中止 Hysteria 官方服务及所有守护单元
+    if command -v systemctl &> /dev/null; then
+        echo -e "${YELLOW}正在中止并注销 Hysteria 主系统服务...${RESET}"
         systemctl stop hysteria-server.service 2>/dev/null || true
+        systemctl stop hysteria-server@*.service 2>/dev/null || true
         systemctl disable hysteria-server.service 2>/dev/null || true
+        systemctl disable hysteria-server@*.service 2>/dev/null || true
         rm -f /etc/systemd/system/hysteria-server.service
         rm -f /etc/systemd/system/hysteria-server@.service
+        rm -f /lib/systemd/system/hysteria-server.service
+        rm -f /lib/systemd/system/hysteria-server@.service
+        rm -f /etc/systemd/system/multi-user.target.wants/hysteria-server.service
         systemctl daemon-reload
         systemctl reset-failed 2>/dev/null || true
     fi
 
+    # 5. 终止所有运行中残留进程
     if pgrep -f hysteria &> /dev/null; then
         pkill -9 -f hysteria
     fi
 
+    # 6. 调用官方移除命令
     if command -v curl &> /dev/null; then
         bash <(curl -fsSL https://get.hy2.sh/) --remove 2>/dev/null || true
     fi
 
-    echo -e "${YELLOW}正在清理内核防断流调优配置...${RESET}"
+    # 7. 仅清理专属的 NAT 临时配置文件，不执行全局覆盖，确保 BBR 完整保留
+    echo -e "${YELLOW}正在清理专属 NAT 配置 (保留系统原有 BBR 拥塞控制配置)...${RESET}"
     rm -f /etc/sysctl.d/99-hysteria-nat.conf
-    sysctl --system >/dev/null 2>&1 || true
 
-    echo -e "${YELLOW}正在物理销毁配置文件、二进制核心与证书存放目录...${RESET}"
+    # 8. 物理销毁文件系统残余目录
+    echo -e "${YELLOW}正在销毁程序二进制、证书实体与数据目录...${RESET}"
     rm -f /usr/local/bin/hysteria
+    rm -f /usr/bin/hysteria
     rm -rf /etc/hysteria
     rm -rf /usr/local/etc/hysteria
     rm -rf /var/log/hysteria
+    rm -rf /run/hysteria
+    rm -rf /var/run/hysteria
 
-    echo -e "${YELLOW}正在清理 acme.sh 证书环境与计划续期任务...${RESET}"
+    # 9. 彻底清理 acme.sh 证书环境与计划任务
+    echo -e "${YELLOW}正在清理 acme.sh 环境及定时续期计划任务...${RESET}"
     if [ -f "/root/.acme.sh/acme.sh" ]; then
-        /root/.acme.sh/acme.sh --uninstall >/dev/null 2>&1
+        /root/.acme.sh/acme.sh --uninstall >/dev/null 2>&1 || true
     fi
     rm -rf /root/.acme.sh
+    rm -rf /root/.acme.sh_bak*
+    
     if command -v crontab &> /dev/null; then
-        crontab -l 2>/dev/null | grep -v 'acme.sh' | crontab - 2>/dev/null || true
+        for u in root $(cut -f1 -d: /etc/passwd); do
+            crontab -u "$u" -l 2>/dev/null | grep -v 'acme.sh' | crontab -u "$u" - 2>/dev/null || true
+        done
     fi
 
-    echo -e "${YELLOW}正在清理服务运行日志...${RESET}"
+    # 10. 删除专用系统用户
+    if id hysteria &>/dev/null; then
+        userdel -r hysteria 2>/dev/null || userdel hysteria 2>/dev/null || true
+        groupdel hysteria 2>/dev/null || true
+    fi
+
+    # 11. 清理日志
+    echo -e "${YELLOW}正在清理系统运行日志痕迹...${RESET}"
     if command -v journalctl &> /dev/null; then
         journalctl --rotate >/dev/null 2>&1 || true
         journalctl --vacuum-time=1s -u hysteria-server >/dev/null 2>&1 || true
+        journalctl --vacuum-time=1s -u hysteria-porthop >/dev/null 2>&1 || true
     fi
 
+    # 12. 脚本自毁
     SCRIPT_PATH=$(readlink -f "$0")
     rm -f "$SCRIPT_PATH"
 
     echo -e "${GREEN}======================================================${RESET}"
-    echo -e "${GREEN} 卸载完成！Hysteria 2 核心、配置信息、防断流设置、证书及端口跳跃规则已清除。${RESET}"
+    echo -e "${GREEN} 卸载完成！Hysteria 2、防火墙规则、证书环境、计划任务${RESET}"
+    echo -e "${GREEN} 及系统服务痕迹已彻底无痕清除，系统 BBR 配置完好无损。${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
     exit 0
 }
@@ -512,7 +573,7 @@ show_menu() {
     echo -e "${GREEN}      Hysteria 2 自动化部署与管理脚本 (完善防断流版)        ${RESET}"
     echo -e "${GREEN}======================================================${RESET}"
     echo -e "${CYAN} 1.${RESET} 安装 Hysteria 2 (端口跳跃防 QoS / NAT 深度防断流优化)"
-    echo -e "${CYAN} 2.${RESET} 彻底无痕卸载 Hysteria 2"
+    echo -e "${CYAN} 2.${RESET} 彻底无痕卸载 Hysteria 2 (安全清理，不损 BBR)"
     echo -e "${CYAN} 0.${RESET} 退出脚本"
     echo -e "${GREEN}======================================================${RESET}"
     echo ""
@@ -524,7 +585,7 @@ show_menu() {
             install_hysteria2
             ;;
         2)
-            read -p "您确定要彻底卸载 Hysteria 2、清理网络规则并删除此脚本自身吗？[y/N]: " confirm
+            read -p "您确定要彻底卸载 Hysteria 2、清理所有网络规则并删除此脚本自身吗？[y/N]: " confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 uninstall_hysteria2
             else
